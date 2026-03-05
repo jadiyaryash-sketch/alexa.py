@@ -8,76 +8,228 @@ import sounddevice as sd
 import numpy as np
 import io
 import wave
+import requests
+import logging
+import os
+import random
+import psutil
 
-# Initialize the recognizer and text-to-speech engine
+# ---------------- CONFIG ---------------- #
+
+WAKE_WORD = "alexa"
+SAMPLE_RATE = 16000
+DURATION = 5
+NEWS_API_KEY = "YOUR_NEWS_API_KEY"
+
+# ---------------- LOGGING ---------------- #
+
+logging.basicConfig(
+    filename="assistant_log.txt",
+    level=logging.INFO,
+    format="%(asctime)s - %(message)s"
+)
+
+# ---------------- INITIALIZE ---------------- #
+
 listener = sr.Recognizer()
 engine = pyttsx3.init()
-
-# Set female voice (optional)
 voices = engine.getProperty('voices')
-engine.setProperty('voice', voices[1].id)  # Use [0] for male voice
+engine.setProperty('voice', voices[1].id)
+tasks = []
+memory = []
 
-SAMPLE_RATE = 16000
-DURATION = 5  # seconds to listen
-
+# ---------------- SPEAK FUNCTION ---------------- #
 
 def talk(text):
-    """Convert text to speech."""
     print("Alexa:", text)
+    logging.info("Alexa: " + text)
     engine.say(text)
     engine.runAndWait()
 
+# ---------------- AUDIO RECORD ---------------- #
 
 def record_audio():
-    """Record audio using sounddevice and return an AudioData object."""
-    print("Listening...")
     audio_np = sd.rec(
         int(DURATION * SAMPLE_RATE),
         samplerate=SAMPLE_RATE,
         channels=1,
         dtype='int16'
     )
-    sd.wait()  # Wait until recording is complete
+    sd.wait()
 
-    # Convert numpy array to WAV bytes
     wav_buffer = io.BytesIO()
     with wave.open(wav_buffer, 'wb') as wf:
         wf.setnchannels(1)
-        wf.setsampwidth(2)  # 16-bit audio = 2 bytes
+        wf.setsampwidth(2)
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(audio_np.tobytes())
-    wav_buffer.seek(0)
 
+    wav_buffer.seek(0)
     with sr.AudioFile(wav_buffer) as source:
         audio_data = listener.record(source)
+
     return audio_data
 
+# ---------------- LISTEN ---------------- #
 
 def take_command():
-    """Listen to user's voice and recognize the command."""
     command = ""
     try:
         audio_data = record_audio()
         command = listener.recognize_google(audio_data)
         command = command.lower()
-        if 'alexa' in command:
-            command = command.replace('alexa', '').strip()
-        print("You said:", command)
-    except sr.UnknownValueError:
-        print("Sorry, I didn't understand that.")
-    except sr.RequestError:
-        print("Network error. Check your internet connection.")
-    except Exception as e:
-        print(f"Error: {e}")
+
+        if WAKE_WORD in command:
+            command = command.replace(WAKE_WORD, "").strip()
+
+        print("You:", command)
+        logging.info("User: " + command)
+
+    except:
+        pass
+
     return command
 
+# ---------------- NEWS ---------------- #
+
+def get_news():
+    try:
+        url = f"https://newsapi.org/v2/top-headlines?country=in&apiKey={NEWS_API_KEY}"
+        news = requests.get(url).json()
+        talk("Here are the top headlines")
+
+        for article in news["articles"][:5]:
+            talk(article["title"])
+
+    except:
+        talk("Unable to fetch news")
+
+# ---------------- SYSTEM STATUS ---------------- #
+
+def system_status():
+    battery = psutil.sensors_battery()
+    cpu = psutil.cpu_percent()
+    talk(f"Battery is at {battery.percent} percent")
+    talk(f"CPU usage is {cpu} percent")
+
+# ---------------- GOOGLE SEARCH ---------------- #
+
+def google_search(command):
+    query = command.replace("search", "")
+    talk("Searching Google for " + query)
+    pywhatkit.search(query)
+
+# ---------------- PLAY MUSIC ---------------- #
+
+def play_music():
+    music_folder = "C:/Music"
+    try:
+        songs = os.listdir(music_folder)
+        song = random.choice(songs)
+        os.startfile(os.path.join(music_folder, song))
+        talk("Playing music")
+    except:
+        talk("Music folder not found")
+
+# ---------------- OPEN APPS ---------------- #
+
+def open_app(command):
+    if "chrome" in command:
+        os.system("start chrome")
+    elif "notepad" in command:
+        os.system("start notepad")
+
+# ---------------- TASK MANAGER ---------------- #
+
+def handle_tasks(command):
+    global tasks
+
+    if "add task" in command:
+        task = command.replace("add task", "")
+        tasks.append(task)
+        talk("Task added")
+
+    elif "show tasks" in command:
+        if tasks:
+            for t in tasks:
+                talk(t)
+        else:
+            talk("Your task list is empty")
+
+# ---------------- MEMORY ---------------- #
+
+def remember(command):
+    global memory
+
+    if "remember" in command:
+        info = command.replace("remember", "")
+        memory.append(info)
+        talk("I will remember that")
+
+    elif "what do you remember" in command:
+        if memory:
+            for m in memory:
+                talk(m)
+        else:
+            talk("I don't remember anything yet")
+
+# ---------------- DATE ---------------- #
+
+def tell_date():
+    today = datetime.datetime.now().strftime("%A, %d %B %Y")
+    talk("Today is " + today)
+
+# ---------------- OLLAMA ---------------- #
+
+def ask_ollama(prompt):
+    try:
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "gemma3:1b",
+                "prompt": prompt,
+                "stream": False
+            },
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            return "I could not connect to the AI system"
+
+        try:
+            result = response.json()
+        except:
+            return "I could not parse the AI response"
+
+        if "response" not in result:
+            return "I could not get a response from the AI system"
+
+        # Remove emoji and special characters that might cause encoding issues
+        response_text = result["response"].strip()
+        response_text = ''.join(c for c in response_text if ord(c) < 128 or c in 'éèêëàâäùûüôöäöüß')
+
+        return response_text if response_text else "I am thinking about that."
+
+    except requests.exceptions.Timeout:
+        return "The AI system is taking too long to respond"
+
+    except requests.exceptions.ConnectionError:
+        return "I cannot connect to Ollama. Make sure it's running"
+
+    except Exception as e:
+        logging.error(f"Ollama error: {str(e)}")
+        return "I could not connect to the AI system"
+
+# ---------------- MAIN COMMAND HANDLER ---------------- #
 
 def run_alexa():
-    """Process the command and respond accordingly."""
     command = take_command()
 
+    if command == "":
+        return
+
     if 'play' in command:
-        song = command.replace('play', '').strip()
+        song = command.replace('play', '')
         talk("Playing " + song)
         pywhatkit.playonyt(song)
 
@@ -85,34 +237,82 @@ def run_alexa():
         time = datetime.datetime.now().strftime('%I:%M %p')
         talk("The current time is " + time)
 
-    elif 'who is' in command or 'who the heck is' in command:
-        person = command.replace('who the heck is', '').replace('who is', '').strip()
+    elif 'who is' in command:
+        person = command.replace('who is', '').strip()
+        person = ' '.join(person.split())  # Remove multiple spaces
+
         try:
-            info = wikipedia.summary(person, 1)
-            print(info)
-            talk(info)
-        except Exception:
-            talk("I couldn't find information on that.")
+            if person:
+                try:
+                    info = wikipedia.summary(person, sentences=2, auto_suggest=False)
+                except wikipedia.exceptions.PageError:
+                    person_cap = person.title()
+                    info = wikipedia.summary(person_cap, sentences=2, auto_suggest=False)
 
-    elif 'date' in command:
-        talk("Sorry, I have a headache today.")
+                talk(info)
+            else:
+                talk("Please tell me who you want to know about")
 
-    elif 'are you single' in command:
-        talk("I am in a relationship with Wi-Fi.")
+        except wikipedia.exceptions.DisambiguationError:
+            talk(f"There are multiple people named {person}. Can you be more specific?")
+
+        except wikipedia.exceptions.PageError:
+            talk(f"I couldn't find information about {person}. Try a different name.")
+
+        except Exception as e:
+            talk(f"I couldn't look up {person} right now")
 
     elif 'joke' in command:
         talk(pyjokes.get_joke())
 
-    elif command != "":
-        talk("Please say the command again.")
+    elif 'news' in command:
+        get_news()
+
+    elif 'system status' in command:
+        system_status()
+
+    elif 'search' in command:
+        google_search(command)
+
+    elif 'play music' in command:
+        play_music()
+
+    elif 'open' in command:
+        open_app(command)
+
+    elif 'add task' in command or 'show tasks' in command:
+        handle_tasks(command)
+
+    elif 'remember' in command or 'what do you remember' in command:
+        remember(command)
+
+    elif 'date' in command or 'day' in command:
+        tell_date()
+
+    elif 'volume up' in command:
+        engine.setProperty('volume', 1.0)
+        talk("Volume increased")
+
+    elif 'volume down' in command:
+        engine.setProperty('volume', 0.5)
+        talk("Volume reduced")
+
+    elif 'exit' in command or 'stop' in command:
+        talk("Goodbye")
+        exit()
 
     else:
-        pass  # No voice detected, ignore silently
+        talk("Let me think")
+        response = ask_ollama(command)
+        talk(response)
 
+# ---------------- MAIN LOOP ---------------- #
 
-# Run Alexa continuously
 if __name__ == "__main__":
-    print("Alexa is running! Say 'Alexa' followed by a command.")
-    print("Press Ctrl+C to stop.\n")
+    print("Voice Assistant Running")
+    print("Say 'Alexa' followed by a command\n")
+
+    talk("Hello, I am ready")
+
     while True:
         run_alexa()
